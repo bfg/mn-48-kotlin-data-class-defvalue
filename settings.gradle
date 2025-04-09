@@ -1,0 +1,12 @@
+//
+// settings.gradle
+//
+
+rootProject.name="mn-48-kotlin-data-class-defvalue"
+
+// trying to support groovy incremental compilation
+// SEE: https://docs.gradle.org/current/userguide/groovy_plugin.html#sec:incremental_groovy_compilation
+enableFeaturePreview('GROOVY_COMPILATION_AVOIDANCE')
+
+// vim:shiftwidth=2 softtabstop=2 expandtab
+// EOF

@@ -1,0 +1,230 @@
+//
+// build.gradle
+//
+
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+buildscript {
+  ext {
+    micronautVersion        = "4.7.6"
+    //micronautVersion        = "4.8.0"
+
+    kotlinVersion           = "2.1.20"
+    kotlinKspVersion        = "1.0.31"
+
+    kotlinLoggingVersion    = "7.0.4"
+  }
+}
+
+plugins {
+  id("org.jetbrains.kotlin.jvm")            version "${kotlinVersion}"
+  id("org.jetbrains.kotlin.plugin.allopen") version "${kotlinVersion}"
+  id("com.google.devtools.ksp")             version "${kotlinVersion}-${kotlinKspVersion}"
+
+  id("groovy")
+  id("idea")
+
+  id "com.gradleup.shadow"                  version "8.3.5"
+  id "com.adarshr.test-logger"              version "4.0.0"
+  id "com.google.cloud.tools.jib"           version "3.4.2"
+  id "com.google.osdetector"                version "1.7.3"
+
+  id("io.micronaut.application")            version "4.5.1"
+}
+
+repositories {
+  mavenLocal()
+  mavenCentral()
+}
+
+configurations {
+
+  // okhttp is pulled in by javamoney moneta-core
+  all*.exclude  group: "com.squareup.okhttp3"
+}
+
+dependencies {//
+  ksp("io.micronaut:micronaut-http-validation")
+  ksp("io.micronaut.serde:micronaut-serde-processor")
+  ksp("io.micronaut.validation:micronaut-validation-processor")
+  ksp("io.micronaut:micronaut-inject-kotlin")
+  ksp("io.micronaut:micronaut-graal")
+
+  ////////////////////////////////////////////////////////////////////
+  // BEGIN: micronaut
+  implementation("io.micronaut:micronaut-http-server-netty")
+  implementation("io.micronaut:micronaut-inject-java")
+
+  implementation("io.micronaut:micronaut-http-client")
+  implementation("io.micronaut.kotlin:micronaut-kotlin-extension-functions")
+  implementation("io.micronaut.kotlin:micronaut-kotlin-runtime")
+  implementation("io.micronaut.serde:micronaut-serde-jackson")
+  implementation("io.micronaut.problem:micronaut-problem-json")
+  implementation("io.micronaut.validation:micronaut-validation")
+  // END:   micronaut
+  ////////////////////////////////////////////////////////////////////
+
+
+  compileOnly("org.graalvm.nativeimage:svm")
+
+  implementation("io.github.oshai:kotlin-logging-jvm:${kotlinLoggingVersion}")
+
+  runtimeOnly("ch.qos.logback:logback-classic")
+
+  // force spockframework version to one defined in gradle/libs.versions.toml
+  api(platform(libs.boms.spock))
+  testImplementation("org.apache.groovy:groovy-json")
+
+  // spock
+  testImplementation("io.micronaut.test:micronaut-test-spock")
+  testImplementation("org.junit.jupiter:junit-jupiter-api")
+  testImplementation("org.spockframework:spock-core") {
+    exclude group: "org.codehaus.groovy", module: "groovy-all"
+  }
+}
+
+application {
+  mainClass.set("com.github.bfg.mn48.Application")
+}
+
+java {
+  sourceCompatibility = JavaVersion.toVersion("21")
+}
+
+ksp {
+  arg("konvert.enable-converters", "true")
+  arg("konvert.add-generated-konverter-annotation", "true")
+  arg("konvert.enforce-not-null", "true")
+}
+
+tasks {
+  compileJava {
+    options.compilerArgs += [
+        "-parameters",
+    ]
+  }
+  compileKotlin {
+    compilerOptions {
+      javaParameters    = true
+      freeCompilerArgs  = ['-Xjvm-default=all']
+      jvmTarget         = JvmTarget.JVM_21
+    }
+  }
+
+  dockerBuild {
+    images = ["${System.env.DOCKER_IMAGE ?: project.name}:$project.version"]
+  }
+
+  dockerBuildNative {
+    images = ["${System.env.DOCKER_IMAGE ?: project.name}:$project.version"]
+  }
+
+  jib {
+    to {
+      image = "gcr.io/myapp/jib-image"
+    }
+  }
+}
+
+// reproducible archives, see: https://docs.gradle.org/8.7/userguide/working_with_files.html#sec:reproducible_archives
+tasks.withType(AbstractArchiveTask).configureEach {
+  preserveFileTimestamps = false
+  reproducibleFileOrder = true
+}
+
+// groovy incremental compilation
+// SEE: https://docs.gradle.org/current/userguide/groovy_plugin.html#sec:incremental_groovy_compilation
+tasks.withType(GroovyCompile).configureEach {
+  // disable annotation processors during groovy compilation, REQUIRED in order to support groovy incremental
+  // compilation, SEE: https://github.com/gradle/gradle/issues/9871
+  options.compilerArgs.add("-proc:none")
+
+  // enable groovy incremental compilation
+  options.incremental = true
+  options.incrementalAfterFailure = true
+}
+
+// don't use micronaut-docker support
+buildLayers.onlyIf { false }
+startScripts.onlyIf { false }
+
+testlogger {
+  theme 'mocha'
+  slowThreshold 2000
+}
+
+// application/shadowJar plugins: disable creation of distribution archives
+distZip.enabled = distTar.enabled = shadowDistTar.enabled = shadowDistZip.enabled = false
+shadowJar {
+  // enable shadowJar task only if it's explicitly requested via cli by containing "shadowJar" in the task list
+  onlyIf {
+    gradle.startParameter.taskRequests.find {
+      it.args.find { it.contains("shadowJar") } != null
+    } != null
+  }
+
+  mergeServiceFiles()
+}
+
+graalvmNative {
+	toolchainDetection = true
+  binaries {
+    main {
+      imageName     = "mn-yauaa"
+      fallback      = false
+      richOutput    = true
+
+      buildArgs.addAll([
+          '-H:+UnlockExperimentalVMOptions',
+      ])
+
+      buildArgs.add("-Ob")
+
+      // linux specifics/optimizations
+      if (osdetector.os == 'linux') {
+        // everybody likes statically linked binaries
+        // NOTE: native-image doesn't really produce truly statically linked binaries on glibc systems,
+        //       and to make matters even worse, produced statically linked binaries tend to crash
+        //       on systems with different glibc versions, yup, rly :-/
+        //       additionally, build fails on ubuntu 24 when --static is used in combination with -O3
+        //buildArgs.add("--static")
+
+        // The G1 garbage collector ('--gc=G1') is currently only supported on AMD64 and AArch64.
+        if (osdetector.arch in ['x86_64', 'aarch64']) {
+          buildArgs.add("--gc=G1")
+          // graalvm-enterprise
+          //buildArgs.add("-XX:MaximumHeapSizePercent=85")
+        }
+      }
+    }
+  }
+}
+
+micronaut {
+  version(micronautVersion)
+  runtime("netty")
+  testRuntime("spock2")
+  processing {
+    incremental(true)
+    annotations("com.github.bfg.*")
+  }
+}
+
+test {
+  maxHeapSize = "2G"
+}
+
+// gradlew run settings
+run {
+  // activate dev and local environments by default, so application-dev/local.conf will be loaded as well
+  systemProperty("micronaut.environments", "dev,local")
+}
+
+// BEGIN: jib
+
+tasks.named("dockerfile") {
+  baseImage = "azul/zulu-openjdk:21-jre"
+}
+
+// vim:shiftwidth=2 softtabstop=2 expandtab
+// EOF
